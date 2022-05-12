@@ -1,0 +1,933 @@
+---
+title: "RNAseL RNAseq Analysis"
+author: "Hernan Lorenzi"
+date: "3/1/2022"
+output: html_notebook
+---
+
+# Load libraries
+```{r load libraries}
+suppressMessages(library("org.Hs.eg.db"))
+suppressMessages(library("pheatmap"))
+suppressMessages(library("EnhancedVolcano"))
+suppressMessages(library("ggplot2"))
+suppressMessages(library("ggpubr"))
+suppressMessages(library("DESeq2"))
+suppressMessages(library("stringr"))
+suppressMessages(library("biomaRt"))
+suppressMessages(library("tidyverse"))
+suppressMessages(library("pcaExplorer"))
+suppressMessages(library("VennDiagram"))
+suppressMessages(library("clusterProfiler"))
+suppressMessages(library("GOSemSim"))
+suppressMessages(library("ggsci"))
+suppressMessages(library("viridis"))
+suppressMessages(library("ggrepel"))
+suppressMessages(library("RColorBrewer"))
+suppressMessages(library("msigdbr"))
+suppressMessages(library("cowplot"))
+suppressMessages(library("enrichplot"))
+suppressMessages(library("ReactomePA"))
+suppressMessages(library("ggupset"))
+```
+
+# Define functions
+```{r aux functions}
+
+# Load auxyliary functions
+source(file = "01_aux_rnaseq_functions.R")
+
+# Load enrichment functions
+source(file = "./02_Gene_enrichment_functions.R")
+
+```
+
+
+# Load data
+```{r Loading data}
+all <- read.delim2("read_counts_exonic.txt", sep = "\t", header = TRUE, row.names = 1, comment.char = c("#"))
+
+# delete columns corrsponding to polyA-selected samples (AK067M, AK068M, AK069M)
+all <- all[,!colnames(all) %in% c("AK5404_67", "AK5404_68", "AK5404_69")]
+
+# Make sure read counts are numeric and rounded to 0 decimals
+all.tmp <- as.data.frame(lapply(all, function(x){ round(as.numeric(x), digits = 0)} ))
+rownames(all.tmp) <- rownames(all)
+all <- all.tmp
+
+# Keep table with Ensemble IDs and gene Symbols
+gene_symbols <- replace_gene_acc_by_symbol_ids(rownames(all))
+ensembl_to_symbol <- as.data.frame(cbind("Ensembl_ID" = rownames(all), "gene_name" = gene_symbols), row.names = 1)
+
+# Load metadata
+metadata <- read.delim2("Metadata.txt", sep = "\t", row.names = 1, header = T)
+
+# Sort tables so metadata and read counts match order
+metadata<-  metadata[match(colnames(all), metadata$Sample_name), ]
+
+# Replace all.colnames by metadata.rownames( i.e. base names)
+colnames(all) <- rownames(metadata)
+
+# Add total read counts and sample id columns to metadata
+metadata <- cbind(metadata, Read_counts =colSums(all), Sample_id = rownames(metadata))
+
+
+#Remove all zero rows
+all <- remove_all_zero_rows(all, min_total_count = 0)
+
+```
+
+# Normalize data to TPMs to run some comparative analysis across samples
+```{r}
+all.tpm <- normalize_by_TPM(all)
+```
+
+###########################################
+# Analysis of expression data using DESeq2
+###########################################
+
+```{r deseq2}
+# Convert metadata to factors
+for (variable in c("Sequencing_pool", "Read_length","Machine", "Genotype","Group",	"Colection_time",	"X25A",	"PolyIC",	"Triptolyde",	"CHX",	"Puromycin",	"Dataset",	"Inducer",	"Treatment" )){
+  metadata[,variable] <- as.factor(metadata[,variable])  
+}
+
+# Subset metadata and count tables by Data
+meta_one <- subset(metadata, metadata$Dataset == "one")
+all_one <- all[, rownames(meta_one)]
+all_one.tpm <- as.data.frame(all.tpm[, rownames(meta_one)])
+meta_cotreat <- subset(metadata, metadata$Dataset == "two_cotreated")
+all_cotreat <- all[, rownames(meta_cotreat)]
+meta_post_treat <- subset(metadata, metadata$Dataset == "two_post_treated")
+all_post_treat <- all[, rownames(meta_post_treat)]
+```
+
+# Analysis of Dataset ONE
+
+```{r Dataset one}
+# Generate DESeq2 object for NS and ST condition ONLY. We could potentially add Read_counts as either a covariate or as a factor (by grouping Read counts into Low and High count bins). Ideally, this should be done adding Read_counts as a random effect using mixed models, that can only be applied in Limma package. Addind it as a fixed effect in the fdesign formula might lower the power of the analysis.  
+#dds.one <- DESeqDataSetFromMatrix(countData = all_one, 
+#                              colData = meta_one,  
+#                              design = ~ Genotype + Inducer + Genotype:Inducer)
+
+# add new factors (Group_gt_ind and Read_depth (high > 10M reads / Low < 10M reads))
+meta_one$Group_gt_ind <- factor(paste0(meta_one$Genotype, meta_one$Inducer))
+meta_one$Read_depth <- 'High'
+meta_one[meta_one$Read_counts < 1e7,]$Read_depth <- 'Low'
+meta_one$Read_depth <- as.factor(meta_one$Read_depth)
+
+# Adding read_depth in design to control for read_depth
+dds.one <- DESeqDataSetFromMatrix(countData = all_one, 
+                              colData = meta_one,  
+                              design = ~ Read_depth + Group_gt_ind)
+
+# Plot total reads per sample using barchar
+p <- ggbarplot(data = meta_one, 
+          x = "Sample_id", 
+          y = "Read_counts",
+          x.text.angle = 90,
+          fill = "Inducer", 
+          title = "Total read counts", 
+          ylab = "Read counts",
+          sort.by.groups = TRUE,
+          palette = "jco",
+          sort.val = "asc", 
+          facet.by = "Genotype")
+ggsave("Plots/barplot_read_counts.pdf", plot = p)
+p
+
+
+# Normalize counts
+vsd.one <- vst(dds.one, blind=FALSE)
+rlog.one <- rlog(dds.one, blind=FALSE)
+
+# Keep genes with at least 10 reads total across samples
+keep <- rowSums(counts(dds.one)) >= 20
+dds.one <- dds.one[keep,]
+
+# Calculate distances between samples
+sampleDists <- dist(t(assay(vsd.one)))
+
+# Plot inter-sample distances
+old.par <- par(no.readonly=T)
+
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(rlog.one$Sequencing_pool, rlog.one$Genotype, rlog.one$Inducer, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+# PCA
+pcaData <- plotPCA(rlog.one, intgroup=c("Genotype", "Inducer"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+y.coords = c(min(pcaData$PC1, pcaData$PC2), max(pcaData$PC1, pcaData$PC2))
+x.coords = y.coords
+p1 <- ggplot(pcaData, aes(PC1, PC2, color=Genotype, shape=Inducer)) +
+  geom_point(size=3) + scale_color_lancet() + 
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed(ratio = (max(pcaData$PC1)-min(pcaData$PC1))/(max(pcaData$PC2)-min(pcaData$PC2))) 
+
+ggsave("Plots/pca_dataset_1_Induc_gt.pdf", plot = p1)
+p1
+
+pcaData <- plotPCA(rlog.one, intgroup=c("Read_counts", "Inducer"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+p2 <- ggplot(pcaData, aes(PC1, PC2, color=Read_counts, shape=Inducer)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed(ratio = (max(pcaData$PC1)-min(pcaData$PC1))/(max(pcaData$PC2)-min(pcaData$PC2))) + scale_color_gradient2(high = "blue", mid = "yellow")
+p2
+ggsave("Plots/pca_dataset_1_Induc_read_counts.pdf", plot = p2)
+```
+
+### resultsNames(dds)
+
+# Filtering out poorly-expressed genes (less than 20 reads across all samples) 
+```{r filtering genes based on total counts of reads}
+
+# Keep genes with at least 10 reads total across samples
+keep <- rowSums(counts(dds.one)) >= 20
+dds.one <- dds.one[keep,]
+
+dds.one.wt <- dds.one[ , dds.one$Genotype == "WT"]
+dds.one.wt$Genotype <- droplevels( dds.one.wt$Genotype)
+dds.one.wt$Group_gt_ind <- droplevels( dds.one.wt$Group_gt_ind)
+dds.one.wt$Group <- droplevels( dds.one.wt$Group)
+
+dds.one.ko <- dds.one[ , dds.one$Genotype == "RNaseL_KO"]
+dds.one.ko$Genotype <- droplevels( dds.one.ko$Genotype)
+dds.one.ko$Group_gt_ind <- droplevels( dds.one.ko$Group_gt_ind)
+dds.one.ko$Group <- droplevels( dds.one.ko$Group)
+
+```
+
+
+
+# Using groups instead of interactions
+
+```{r}
+
+# Calculate DE for WT samples
+dds.one.wt$Group_gt_ind <- relevel(dds.one.wt$Group_gt_ind, "WTNone")
+dds.one.wt <- DESeq(dds.one.wt)
+resultsNames(dds.one.wt)
+
+
+# Using lfcShrink instead of results to reduce high Log2FC bias of genes with low expression
+res_wtIC_vs_wtNone <- lfcShrink(dds.one.wt, coef = "Group_gt_ind_WTpolyIC_vs_WTNone", type = "ashr", )
+res_wt25A_vs_wtNone <- lfcShrink(dds.one.wt, coef = "Group_gt_ind_WT25A_vs_WTNone", type = "ashr")
+
+summary(res_wtIC_vs_wtNone, alpha = 0.05)
+summary(res_wt25A_vs_wtNone, alpha = 0.05)
+
+# Calculate DE for KO samples
+dds.one.ko$Group_gt_ind <- relevel(dds.one.ko$Group_gt_ind, "RNaseL_KONone")
+dds.one.ko <- DESeq(dds.one.ko)
+resultsNames(dds.one.ko)
+
+res_koIC_vs_koNone <- lfcShrink(dds.one.ko, coef = "Group_gt_ind_RNaseL_KOpolyIC_vs_RNaseL_KONone", type = "ashr")
+res_ko25A_vs_koNone <- lfcShrink(dds.one.ko, coef = "Group_gt_ind_RNaseL_KO25A_vs_RNaseL_KONone", type = "ashr")
+
+summary(res_koIC_vs_koNone, alpha = 0.05)
+summary(res_ko25A_vs_koNone, alpha = 0.05)
+
+# Define function for processing and saving result tables
+sort_and_write_res_table <- function(result_table, file_name){
+  # Sort genes by (padj)
+  result_table_sorted <- result_table[order(result_table$padj, decreasing = FALSE),]
+  # Add gene symbols
+  gene_list <- rownames(result_table_sorted)
+  symbol_list <- ensembl_to_symbol$gene_name[match(gene_list, ensembl_to_symbol$Ensembl_ID)]
+  df <-as.data.frame(cbind(result_table_sorted, Gene_name = symbol_list))
+  
+  # Write sorted table to file
+  write.table(df, file = paste0("./DE/",file_name,".txt"), 
+            sep = "\t", col.names=NA)
+  return(result_table_sorted)
+}
+
+# Sort results by Log2FC
+res_wtIC_vs_wtNone.logfc_sorted <- sort_and_write_res_table(res_wtIC_vs_wtNone, "DE_wtIC_vs_wtNone")
+res_koIC_vs_koNone.logfc_sorted <- sort_and_write_res_table(res_koIC_vs_koNone, "DE_koIC_vs_koNone")
+res_wt25A_vs_wtNone.logfc_sorted <- sort_and_write_res_table(res_wt25A_vs_wtNone, "DE_wt25A_vs_wtNone")
+res_ko25A_vs_koNone.logfc_sorted <- sort_and_write_res_table(res_ko25A_vs_koNone, "DE_ko25A_vs_koNone")
+
+# Save sorted files as a list
+DE_results = list()
+DE_results[["wtIC_vs_wtNone"]]  <- res_wtIC_vs_wtNone.logfc_sorted
+DE_results[["koIC_vs_koNone"]] <- res_koIC_vs_koNone.logfc_sorted
+DE_results[["wt25A_vs_wtNone"]] <- res_wt25A_vs_wtNone.logfc_sorted
+DE_results[["ko25A_vs_koNone"]] <- res_ko25A_vs_koNone.logfc_sorted
+
+# Generate result table of DE genes in  res_wtIC_vs_wtNone but not in res_koIC_vs_koNone
+# or in res_wt25A_vs_wtNone. 
+# This are genes that might require both an induction via dsRNA/DNA and a functional RNAseL
+
+
+# Filter 1 adj.pvalues > 0.25 in other samples
+res_wtIC_vs_wtNone.sig.id <- rownames(res_wtIC_vs_wtNone)[res_wtIC_vs_wtNone$padj <= 0.05 & !is.na(res_wtIC_vs_wtNone$padj)]
+res_koIC_vs_koNone.sig.id <- rownames(res_koIC_vs_koNone)[res_koIC_vs_koNone$padj <= 0.25]
+res_wt25A_vs_wtNone.sig.id <- rownames(res_wt25A_vs_wtNone)[res_wt25A_vs_wtNone$padj <= 0.25]
+
+filtered_ids <- res_wtIC_vs_wtNone.sig.id[!(res_wtIC_vs_wtNone.sig.id %in% c(res_wt25A_vs_wtNone.sig.id, res_koIC_vs_koNone.sig.id))]
+
+res_wtIC_vs_wtNone.filtered <- subset(res_wtIC_vs_wtNone, rownames(res_wtIC_vs_wtNone) %in% filtered_ids)
+res_koIC_vs_koNone.filtered <- subset(res_koIC_vs_koNone, rownames(res_koIC_vs_koNone) %in% filtered_ids)
+res_wt25A_vs_wtNone.filtered <- subset(res_wt25A_vs_wtNone, rownames(res_wt25A_vs_wtNone) %in% filtered_ids)
+
+# Filter 2: abs(Log2FC) res_wt25A_vs_wtNone.filtered < 0.1 
+#filter2 <- log2(abs(res_wtIC_vs_wtNone.filtered$log2FoldChange)/abs(res_wt25A_vs_wtNone.filtered$log2FoldChange)) > log2(3/1) #Log2FC difference >= 3
+filter2 <- abs(res_wt25A_vs_wtNone.filtered$log2FoldChange) < 0.1
+
+# Filter 3: opposite Log2FC
+filter3 <- res_wtIC_vs_wtNone.filtered$log2FoldChange * res_wt25A_vs_wtNone.filtered$log2FoldChange < 0
+
+# Apply filter2 and 3 to res_wtIC_vs_wtNone.filtered
+res_wtIC_vs_wtNone.filtered23 <-  res_wtIC_vs_wtNone.filtered[filter2 | filter3, ]
+
+
+
+# Save res_wtIC_vs_wtNone.filtered object in list
+DE_results[["wtIC_vs_wtNone_KOns_25Ans"]] <- res_wtIC_vs_wtNone.filtered
+DE_results[["wtIC_vs_wtNone_KOns_25Ans_f23"]] <- res_wtIC_vs_wtNone.filtered23
+res_wtIC_vs_wtNone.filtered.logfc_sorted <- sort_and_write_res_table(res_wtIC_vs_wtNone.filtered, "wtIC_vs_wtNone_KOns_25Ans")
+res_wtIC_vs_wtNone.filtered.logfc_sorted <- sort_and_write_res_table(res_wtIC_vs_wtNone.filtered23, "wtIC_vs_wtNone_KOns_25Ans_f23")
+
+print("WT-polyIC vs WT-None")
+summary(res_wtIC_vs_wtNone.logfc_sorted, alpha = 0.05)
+print("KO-polyIC vs KO-None")
+summary(res_koIC_vs_koNone.logfc_sorted, alpha = 0.05)
+print("WT-25A vs WT-None")
+summary(res_wt25A_vs_wtNone.logfc_sorted, alpha = 0.05)
+print("KO-25A vs KO-None")
+summary(res_ko25A_vs_koNone.logfc_sorted, alpha = 0.05)
+
+# Genes significantly DE in WT and induced by polyIC
+wt.g <- rownames(res_wtIC_vs_wtNone.logfc_sorted[!is.na(res_wtIC_vs_wtNone.logfc_sorted$padj) & res_wtIC_vs_wtNone.logfc_sorted$padj <= 0.05,])
+# Genes significantly DE in KO and induced by polyIC
+ko.g <- rownames(res_koIC_vs_koNone.logfc_sorted[!is.na(res_koIC_vs_koNone.logfc_sorted$padj) & res_koIC_vs_koNone.logfc_sorted$padj <= 0.05,])
+# Genes significantly DE in WT and induced by 25A
+wt.25A.g <- rownames(res_wt25A_vs_wtNone.logfc_sorted[!is.na(res_wt25A_vs_wtNone.logfc_sorted$padj) & res_wt25A_vs_wtNone.logfc_sorted$padj <= 0.05,])
+# Genes significantly DE in KO and induced by 25A
+ko.25A.g <- rownames(res_ko25A_vs_koNone.logfc_sorted[!is.na(res_ko25A_vs_koNone.logfc_sorted$padj) & res_ko25A_vs_koNone.logfc_sorted$padj <= 0.05,])
+```
+
+
+# DE analysis between pIC WT and 25A WT
+```{r}
+# Calculate DE between pIC WT and 25A WT samples
+dds.one.wt$Group_gt_ind <- relevel(dds.one.wt$Group_gt_ind, "WT25A")
+dds.one.wt <- DESeq(dds.one.wt)
+resultsNames(dds.one.wt)
+
+
+# Using lfcShrink instead of results to reduce high Log2FC bias of genes with low expression
+res_wtIC_vs_wt25A <- lfcShrink(dds.one.wt, coef = "Group_gt_ind_WTpolyIC_vs_WT25A", type = "ashr", )
+
+summary(res_wtIC_vs_wt25A, alpha = 0.05)
+
+# Save results
+res_wtIC_vs_wt25A.logfc_sorted <- sort_and_write_res_table(res_wtIC_vs_wt25A, "DE_wtIC_vs_wt25A")
+
+gene_ids_wt25A_vs_wtNone_lowFC <- rownames(subset(res_wt25A_vs_wtNone, res_wt25A_vs_wtNone$log2FoldChange <= 0.1))
+res_wtIC_vs_wt25A_sig_fc1 <- subset(res_wtIC_vs_wt25A, res_wtIC_vs_wt25A$padj <= 0.05 & rownames(res_wtIC_vs_wt25A) %in% gene_ids_wt25A_vs_wtNone_lowFC )
+res_wtIC_vs_wt25A_sig_fc1.logfc_sorted <- sort_and_write_res_table(res_wtIC_vs_wt25A_sig_fc1, "DE_wtIC_vs_wt25A_sig_fc1")
+
+# Save res_wtIC_vs_wt25A and res_wtIC_vs_wtNone.filtered objects in DE_results list
+DE_results[["wtIC_vs_wt25A"]] <- res_wtIC_vs_wt25A.logfc_sorted
+DE_results[["wtIC_vs_wt25A_sig_f1"]] <- res_wtIC_vs_wt25A_sig_fc1.logfc_sorted
+
+```
+
+
+# Plot Venn Diagram with DE gene overlaps among treatments.
+```{r}
+VennDiagram::venn.diagram(x = list(wt.g, ko.g, wt.25A.g ),
+  category.names = c("WT_plyI:C", "KO_polyI:C", "WT_25A"),
+  filename = "Inducer_DE_venn.png",
+  imagetype = "png",
+  output=TRUE,
+  height = 480 , 
+  width = 480 , 
+  resolution = 300,
+  compression = "lzw",
+  lwd = 1,
+  col=c("#440154ff", '#21908dff', '#fde725ff'),
+  fill = c(alpha("#440154ff",0.3), alpha('#21908dff',0.3), alpha('#fde725ff',0.3)),
+  cex = 0.5,
+  fontfamily = "sans",
+  cat.cex = 0.3,
+  cat.default.pos = "outer",
+  cat.pos = c(-27, 27, 135),
+  cat.dist = c(0.055, 0.055, 0.085),
+  cat.fontfamily = "sans",
+  #cat.col = c("#440154ff", '#21908dff', '#fde725ff'),
+  rotation = 1
+)
+```
+
+```{r heatmap}
+# Select factors to be displayed together with the expression data
+df.ns <- as.data.frame(colData(dds.one)[,c("Genotype","Inducer")])
+
+# plot_heat_map
+plot_heat_map(my_vstd = vsd.one, gene_list = unique(c(wt.g[1:30],wt.25A.g[1:30],ko.g[1:30])), file_name = "Plots/top10_per_treatment", variables = df.ns)
+
+# Genes significantly DE in WT and not KO when induced by polyIC
+wt_no_ko.g <- wt.g[!wt.g %in% ko.g]
+# Genes significantly DE in KO and not WT when induced by polyIC
+ko_no_wt.g <- ko.g[!ko.g %in% wt.g]
+# Genes significantly DE in WT and not KO when induced by 25A
+wt_no_ko.25A.g <- wt.25A.g[!wt.25A.g %in% ko.25A.g]
+# Genes significantly DE in KO and not WT when induced by 25A
+ko_no_wt.25A.g <- ko.25A.g[!ko.25A.g %in% wt.25A.g]
+
+
+# Results df with genes DE in WT but not in KO
+res_wtIC_vs_wtNone_no_ko <- res_wtIC_vs_wtNone.logfc_sorted[wt_no_ko.g, ]
+res_wt25A_vs_wtNone_no_ko <- res_wt25A_vs_wtNone.logfc_sorted[wt_no_ko.25A.g,]
+x <- sort_and_write_res_table(res_wtIC_vs_wtNone_no_ko, file_name = "res_wtIC_vs_wtNone_no_ko")
+x <- sort_and_write_res_table(res_wt25A_vs_wtNone_no_ko, file_name = "res_wt25A_vs_wtNone_no_ko")
+```
+
+Plot normalized (vst) gene expression per sample
+```{r Plot normalized (vst) gene expression per sample}
+
+# Plot genes with most up and down regulation with each inducer
+genes_of_interest = unique(c(wt.g[1:30],wt.25A.g[1:30],ko.g[1:30]))
+
+plot_normalized_gene_expression(my_dds = dds.one, 
+                                ensmbl_gene_list = genes_of_interest, 
+                                file_prefix = "Genes_with_extreme_up_down_expr_DS_ONE")
+
+```
+
+```{r volcano plots}
+# Print volcano plots for eahc condition
+generate_volcano_plot_with_ids(res.tmp = res_wtIC_vs_wtNone, my_file_name = "res_wtIC_vs_wtNone.logfc_sorted", gene_list = genes_of_interest_symbols)
+generate_volcano_plot_with_ids(res_koIC_vs_koNone, my_file_name = "res_koIC_vs_koNone.logfc_sorted", gene_list = genes_of_interest_symbols)
+generate_volcano_plot_with_ids(res_wt25A_vs_wtNone, my_file_name = "res_wt25A_vs_wtNone.logfc_sorted", gene_list = genes_of_interest_symbols)
+generate_volcano_plot_with_ids(res_ko25A_vs_koNone, my_file_name = "res_ko25A_vs_koNone.logfc_sorted", gene_list = genes_of_interest_symbols)
+
+```
+
+```{r Burke et al Fig 4B pIC WT vs None WT}
+
+# Sort gene symbols based on DE results df
+gene_ids <- rownames(res_wtIC_vs_wtNone)
+matched.tpms <- all_one.tpm[match(gene_ids, table = rownames(all_one.tpm)),]
+matched.symbols <- ensembl_to_symbol[match(gene_ids, table = ensembl_to_symbol$Ensembl_ID),]
+
+# Build input df for Burke's plot
+df <- as.data.frame(cbind(
+                      Log2_pICWT_pICKO = res_wtIC_vs_wtNone$log2FoldChange -
+                        res_koIC_vs_koNone$log2FoldChange, 
+                      Gene_symbols = matched.symbols$gene_name,
+                      tpm_pICWT = log10(rowMeans(
+                        matched.tpms[,meta_one$Group_gt_ind == "WTpolyIC"])),
+                      tpm_NoneWT = log10(rowMeans(
+                        matched.tpms[,meta_one$Group_gt_ind == "WTNone"]))
+                      )
+                    )
+
+# Remove NAs from df
+df <- df[!is.na(df$tpm_NoneWT), ]
+
+# Convert relevant char cols to numeric
+df$Log2_pICWT_pICKO <- as.numeric(df$Log2_pICWT_pICKO) 
+df$tpm_pICWT <- as.numeric(df$tpm_pICWT)
+df$tpm_NoneWT <- as.numeric(df$tpm_NoneWT)
+
+# Add fake gene entries to standardize gradient colors
+df <- as.data.frame(rbind(df, "NA.1" =c(5,NA,NA,NA), "NA.2" =c(-5,NA,NA,NA)) )
+
+# Change -Inf values due to Log10(0) to 0
+#df$tpm_pICWT <- ifelse(df$tpm_pICWT == -Inf, 0, df$tpm_pICWT)
+#df$tpm_NoneWT <- ifelse(df$tpm_NoneWT == -Inf, 0, df$tpm_NoneWT)
+
+# Set extreme differences between Log2FCs to either -5 or 5 for coloring purposes
+df[df$Log2_pICWT_pICKO <= -5, ]$Log2_pICWT_pICKO <- -5
+df[df$Log2_pICWT_pICKO >= 5, ]$Log2_pICWT_pICKO <- 5
+
+# Generate first plot with all genes
+my_gradient <- c("red4","red3" ,"red2" ,"red1", "lightgray","royalblue1" ,"royalblue2","royalblue3","royalblue4")
+my_title <- "Differential expression plot of mRNAs in WT cells treated or not with pIC"
+p3 <- ggplot(df, aes(x=tpm_NoneWT, y=tpm_pICWT, label = Gene_symbols)) + 
+  labs(title = my_title) +
+  xlab(bquote('WT-None '* ~Log[10]*'(TPM)')) +
+  ylab(bquote('WT-pI:C '* ~Log[10]*'(TPM)')) +
+  geom_point(aes(colour=Log2_pICWT_pICKO), size = 0.5, alpha = 1 ) + 
+  xlim(-3,6) + ylim(-3,6) +
+  geom_abline(slope = 1, intercept = 0, col = "black", size=0.5, linetype="dashed") +
+  theme_minimal() + gradient_color(my_gradient) + 
+  theme(
+    legend.direction = "horizontal",  
+    legend.position = c(.95, .10),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(3, 3, 3, 3),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(face = "bold" ,size = 8, vjust = 0.9))
+
+# Change legend title
+p3$labels$colour = paste("log2(pI:C/None)WT - \nlog2(pI:C/None)KO" )
+
+# Making genes of interest bigger
+#genes_of_interesst <- ifelse(df$Log2_pICWT_pICKO > 4 | df$Log2_pICWT_pICKO < -2,  as.character(df$Gene_symbols),NA)
+my_list <- c("RSAD2", "IFNL1", "IFNL2", "IFNB1", "RAET1L","OAS2","EGR1","DHX58","OASL","IFIH1","IFIT1","IFIT2","IFIT3","IL6","NFKBIZ","DDX58","ZC3HAV1","CXCL2","CXCL8","STAT1","MYC","SRRM2","ND4","GAPDH","ACTB","RPL7","RNY3","RNY4","EIF2A","POLR3K")
+genes_of_interest <- ifelse(df$Gene_symbols %in% my_list,  as.character(df$Gene_symbols),NA)
+
+df.subset <- subset(df, Gene_symbols %in% my_list)
+df.subset <- as.data.frame(rbind(df.subset, "NA.1" =c(5,NA,NA,NA), "NA.2" =c(-5,NA,NA,NA)) )
+p3 <- p3 + geom_point(data = df.subset, aes(x = tpm_NoneWT, y = tpm_pICWT, fill=Log2_pICWT_pICKO), size = 3, pch=21, colour="black", show.legend = FALSE) + gradient_fill(my_gradient)
+
+# Adding labels to genes of interest
+p3 <- p3 + geom_text_repel(aes(label = genes_of_interest),
+                  colours = "red",
+                  box.padding   = 0.4, 
+                  point.padding = 0.3,
+                  segment.color = 'green',
+                  na.rm = TRUE,
+                  size = 3,
+                  min.segment.length = 0.02,
+                  direction = "both",
+                  segment.curvature = -0.1,
+                  segment.ncp = 3,
+                  segment.angle = 20,
+                  max.iter = 1e5)
+
+# Saving final plot
+ggsave(filename = "burke4B.pdf", plot = p3, path = "Plots/" )
+
+p3
+```
+
+```{r Burke et al Fig 4B 25A}
+
+# Sort gene symbols based on DE results df
+gene_ids <- rownames(res_wt25A_vs_wtNone)
+matched.tpms <- all_one.tpm[match(gene_ids, table = rownames(all_one.tpm)),]
+matched.symbols <- ensembl_to_symbol[match(gene_ids, table = ensembl_to_symbol$Ensembl_ID),]
+
+# Build input df for Burke's plot
+df <- as.data.frame(cbind(
+                      Log2_25AWT_pICWT = res_wt25A_vs_wtNone$log2FoldChange - res_wtIC_vs_wtNone$log2FoldChange, 
+                      Gene_symbols = matched.symbols$gene_name,
+                      tpm_25AWT = log10(rowMeans(
+                        matched.tpms[,meta_one$Group_gt_ind == "WT25A"])),
+                      tpm_NoneWT = log10(rowMeans(
+                        matched.tpms[,meta_one$Group_gt_ind == "WTNone"]))
+                      )
+                    )
+
+# Remove NAs from df
+df <- df[!is.na(df$tpm_NoneWT), ]
+
+# Convert relevant char cols to numeric
+df$Log2_25AWT_pICWT <- as.numeric(df$Log2_25AWT_pICWT) 
+df$tpm_25AWT <- as.numeric(df$tpm_25AWT)
+df$tpm_NoneWT <- as.numeric(df$tpm_NoneWT)
+
+# Add fake gene entries to standardize gradient colors
+df <- as.data.frame(rbind(df, "NA.1" =c(5,NA,NA,NA), "NA.2" =c(-5,NA,NA,NA)) )
+
+# Change -Inf values due to Log10(0) to 0
+#df$tpm_pICWT <- ifelse(df$tpm_pICWT == -Inf, 0, df$tpm_pICWT)
+#df$tpm_NoneWT <- ifelse(df$tpm_NoneWT == -Inf, 0, df$tpm_NoneWT)
+
+# Set extreme differences between Log2FCs to either -5 or 5 for coloring purposes
+df[df$Log2_25AWT_pICWT <= -5, ]$Log2_25AWT_pICWT <- -5
+df[df$Log2_25AWT_pICWT >= 5, ]$Log2_25AWT_pICWT <- 5
+
+# Generate first plot with all genes
+my_gradient <- c("red4","red3" ,"red2" ,"red1", "lightgray","royalblue1" ,"royalblue2","royalblue3","royalblue4")
+my_title <- "Differential expression plot of mRNAs in WT cells treated or not with 25A"
+p4 <- ggplot(df, aes(x=tpm_NoneWT, y=tpm_25AWT, label = Gene_symbols)) + 
+  labs(title = my_title) +
+  xlab(bquote('WT-None '* ~Log[10]*'(TPM)')) +
+  ylab(bquote('WT-25A '* ~Log[10]*'(TPM)')) +
+  geom_point(aes(colour=Log2_25AWT_pICWT), size = 0.5, alpha = 1 ) + 
+  xlim(-3,6) + ylim(-3,6) +
+  geom_abline(slope = 1, intercept = 0, col = "black", size=0.5, linetype="dashed") +
+  theme_minimal() + gradient_color(my_gradient) + 
+  theme(
+    legend.direction = "horizontal",  
+    legend.position = c(.95, .10),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(3, 3, 3, 3),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(face = "bold" ,size = 8, vjust = 0.9))
+
+# Change legend title
+p4$labels$colour = paste("log2(25A/None)WT - \nlog2(pI:C/None)WT" )
+
+# Making genes of interest bigger
+#genes_of_interesst <- ifelse(df$Log2_pICWT_pICKO > 4 | df$Log2_pICWT_pICKO < -2,  as.character(df$Gene_symbols),NA)
+my_list <- c("RSAD2", "IFNL1", "IFNL2", "IFNB1", "RAETL1","OAS2","EGR1","DHX58","OASL","IFIH1","IFIT1","IFIT2","IFIT3","IL6","NFKBIZ","DDX58","ZC3HAV1","CXCL2","CXCL8","STAT1","MYC","SRRM2","ND4","GAPDH","ACTB","RPL7","RNY3","RNY4","EIF2A","POLR3K")
+genes_of_interest <- ifelse(df$Gene_symbols %in% my_list,  as.character(df$Gene_symbols),NA)
+
+df.subset <- subset(df, Gene_symbols %in% my_list)
+df.subset <- as.data.frame(rbind(df.subset, "NA.1" =c(5,NA,NA,NA), "NA.2" =c(-5,NA,NA,NA)) )
+p4 <- p4 + geom_point(data = df.subset, aes(x = tpm_NoneWT, y = tpm_25AWT, fill=Log2_25AWT_pICWT), size = 3, pch=21, colour="black", show.legend = FALSE) + gradient_fill(my_gradient)
+
+# Adding labels to genes of interest
+p4 <- p4 + geom_text_repel(aes(label = genes_of_interest),
+                  colours = "red",
+                  box.padding   = 0.4, 
+                  point.padding = 0.3,
+                  segment.color = 'green',
+                  na.rm = TRUE,
+                  size = 3,
+                  min.segment.length = 0.02,
+                  direction = "both",
+                  segment.curvature = -0.1,
+                  segment.ncp = 3,
+                  segment.angle = 20,
+                  max.iter = 1e5)
+
+# Saving final plot
+ggsave(filename = "burke4B_25Awt_pICwt.pdf", plot = p4, path = "Plots/" )
+
+p4
+```
+
+```{r Burke et al Fig 4B 25A WT vs KO}
+
+# Sort gene symbols based on DE results df
+gene_ids <- rownames(res_wt25A_vs_wtNone)
+matched.tpms <- all_one.tpm[match(gene_ids, table = rownames(all_one.tpm)),]
+matched.symbols <- ensembl_to_symbol[match(gene_ids, table = ensembl_to_symbol$Ensembl_ID),]
+
+# Build input df for Burke's plot
+df <- as.data.frame(cbind(
+                      Log2_25AWT_25AKO = res_wt25A_vs_wtNone$log2FoldChange - res_ko25A_vs_koNone$log2FoldChange, 
+                      Gene_symbols = matched.symbols$gene_name,
+                      tpm_25AWT = log10(rowMeans(
+                        matched.tpms[,meta_one$Group_gt_ind == "WT25A"])),
+                      tpm_NoneWT = log10(rowMeans(
+                        matched.tpms[,meta_one$Group_gt_ind == "WTNone"]))
+                      )
+                    )
+
+# Remove NAs from df
+df <- df[!is.na(df$tpm_NoneWT), ]
+
+# Convert relevant char cols to numeric
+df$Log2_25AWT_25AKO <- as.numeric(df$Log2_25AWT_25AKO) 
+df$tpm_25AWT <- as.numeric(df$tpm_25AWT)
+df$tpm_NoneWT <- as.numeric(df$tpm_NoneWT)
+
+# Add fake gene entries to standardize gradient colors
+df <- as.data.frame(rbind(df, "NA.1" =c(5,NA,NA,NA), "NA.2" =c(-5,NA,NA,NA)) )
+
+# Change -Inf values due to Log10(0) to 0
+#df$tpm_pICWT <- ifelse(df$tpm_pICWT == -Inf, 0, df$tpm_pICWT)
+#df$tpm_NoneWT <- ifelse(df$tpm_NoneWT == -Inf, 0, df$tpm_NoneWT)
+
+# Set extreme differences between Log2FCs to either -5 or 5 for coloring purposes
+df[df$Log2_25AWT_25AKO <= -5, ]$Log2_25AWT_25AKO <- -5
+df[df$Log2_25AWT_25AKO >= 5, ]$Log2_25AWT_25AKO <- 5
+
+# Generate first plot with all genes
+my_gradient <- c("red4","red3" ,"red2" ,"red1", "lightgray","royalblue1" ,"royalblue2","royalblue3","royalblue4")
+my_title <- "Differential expression plot of mRNAs in WT cells treated or not with 25A"
+p5 <- ggplot(df, aes(x=tpm_NoneWT, y=tpm_25AWT, label = Gene_symbols)) + 
+  labs(title = my_title) +
+  xlab(bquote('WT-None '* ~Log[10]*'(TPM)')) +
+  ylab(bquote('WT-25A '* ~Log[10]*'(TPM)')) +
+  geom_point(aes(colour=Log2_25AWT_25AKO), size = 0.5, alpha = 1 ) + 
+  xlim(-3,6) + ylim(-3,6) +
+  geom_abline(slope = 1, intercept = 0, col = "black", size=0.5, linetype="dashed") +
+  theme_minimal() + gradient_color(my_gradient) + 
+  theme(
+    legend.direction = "horizontal",  
+    legend.position = c(.95, .10),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(3, 3, 3, 3),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(face = "bold" ,size = 8, vjust = 0.9))
+
+# Change legend title
+p5$labels$colour = paste("log2(25A/None)WT - \nlog2(25A/None)KO" )
+
+# Making genes of interest bigger
+#genes_of_interesst <- ifelse(df$Log2_pICWT_pICKO > 4 | df$Log2_pICWT_pICKO < -2,  as.character(df$Gene_symbols),NA)
+my_list <- c("RSAD2", "IFNL1", "IFNL2", "IFNB1", "RAETL1","OAS2","EGR1","DHX58","OASL","IFIH1","IFIT1","IFIT2","IFIT3","IL6","NFKBIZ","DDX58","ZC3HAV1","CXCL2","CXCL8","STAT1","MYC","SRRM2","ND4","GAPDH","ACTB","RPL7","RNY3","RNY4","EIF2A","POLR3K")
+genes_of_interest <- ifelse(df$Gene_symbols %in% my_list,  as.character(df$Gene_symbols),NA)
+
+df.subset <- subset(df, Gene_symbols %in% my_list)
+df.subset <- as.data.frame(rbind(df.subset, "NA.1" =c(5,NA,NA,NA), "NA.2" =c(-5,NA,NA,NA)) )
+p5 <- p5 + geom_point(data = df.subset, aes(x = tpm_NoneWT, y = tpm_25AWT, fill=Log2_25AWT_25AKO), size = 3, pch=21, colour="black", show.legend = FALSE) + gradient_fill(my_gradient)
+
+# Adding labels to genes of interest
+p5 <- p5 + geom_text_repel(aes(label = genes_of_interest),
+                  colours = "red",
+                  box.padding   = 0.4, 
+                  point.padding = 0.3,
+                  segment.color = 'green',
+                  na.rm = TRUE,
+                  size = 3,
+                  min.segment.length = 0.02,
+                  direction = "both",
+                  segment.curvature = -0.1,
+                  segment.ncp = 3,
+                  segment.angle = 20,
+                  max.iter = 1e5)
+
+# Saving final plot
+ggsave(filename = "burke4B_25Awt_25Ako.pdf", plot = p5, path = "Plots/" )
+
+p5
+```
+
+
+
+#################################
+## GO enrichment analysis
+#################################
+
+```{r GO enrichment}
+# The code below selects a list of gene IDs based on a specific Log2FC cutoff for running Overrepresentation analysis with the R function 'enricher'. The list of genes are stored in the variable "gene" for gene IDs = Ensembl gene IDs, and in the variable  'gene.entrezid' for a list of Entrez gene IDs. Usually, geneset databases use eithr Entrez gene IDs or gene symbols as identifiers, so in some cases it is handy to count with a list of genes using Entrez gene IDs. 
+
+#The same code also extract the entire list of genes used for the Differential Expression Analysis as an R list element, using Ensemble gene IDs as keys (names) and Log2FC as values. This geneList is used as input for running Gene Set Enrichment Analysis with the function 'GSEA'. If needed, the code below also generates the same geneList but using Entrez gene IDs as keys.
+
+go.class = list()
+go.overrep = list()
+go.gsea = list()
+
+for (i in names(DE_results)){
+ 
+  dir.create(path = paste0("./GO/", i), showWarnings = FALSE, recursive = TRUE)
+
+  for (ontho in c("BP", "MF", "CC")){ 
+    my_id = paste0(i,"_",ontho)
+    
+    print(paste("go_classification", i, ontho))
+    go.class[[my_id]] <- go_classification(dds_res = DE_results[[i]], 
+                             my_file = i, 
+                             onthology = ontho)
+    
+    print(paste("go_overrep", i, ontho))
+    go.overrep[[my_id]] <- go_overrep(dds_res = DE_results[[i]], 
+                                   my_file = i, 
+                                   onthology = ontho)
+    
+    print(paste("go_gsea", i, ontho))
+    go.gsea[[my_id]] <- go_gsea(dds_res = DE_results[[i]], 
+                                   my_file = i, 
+                                   onthology = ontho)
+  }
+}
+
+
+```
+
+
+###########################################
+## Gene enrichment analysis
+###########################################
+
+MSigDBs can be downloaded from R with the function msigdbr (see below). 
+
+```{r enrichment analysis with MSigDB}
+
+# You can modify the category and subcategory parameters below to retrieve specific gene sets from GSEA's MSIG database.
+for (i in names(DE_results)){
+  # Reset gene lists for each analysis
+  genes = c()
+  geneList = list()
+  
+  print(i)
+  # skip ko25A_vs_koNone results
+  if (dim(DE_results[[i]])[1] == 0){
+    print("skipped! The dds results table is empty.")
+    next
+  }
+  my_prefix <- i
+  
+  ## Gene list of interest (using Log2FC > 0.5 and FDR <= 0.05)
+  genes <- rownames(subset(DE_results[[i]], log2FoldChange > 0.5 & padj <= 0.05))
+  my_ordered_dds_res <- DE_results[[i]][order(DE_results[[i]]$log2FoldChange, decreasing = T, na.last = T), ]
+  geneList <- my_ordered_dds_res$log2FoldChange
+  names(geneList) <- rownames(my_ordered_dds_res)
+  
+  ########################################
+  ## H: hallmark gene sets
+  ########################################
+  # Fetch gene sets
+  msig_h <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, ensembl_gene, ) 
+  
+  # Run overrepresentation analysis
+  run_overrepresentation_analysis(gene_set = msig_h, dds_res = DE_results[[i]], analysis_name = my_prefix, gs_name = "H", type = "general")
+  
+  # Run Gene Set Enrichment Analysis
+  run_enrichment_analysis(gene_set = msig_h, geneList = geneList, analysis_name = my_prefix, gs_name = "H", type = "general")
+  
+  
+  ###########################################################################
+  ## C3 regulatory target gene sets => TFT: transcription factor targets
+  ###########################################################################
+  # Fetch gene sets
+  msig_c3_gtrd <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:GTRD") %>% dplyr::select(gs_name, ensembl_gene, )
+  msig_c3_tft <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:TFT_Legacy") %>% dplyr::select(gs_name, ensembl_gene, )
+  
+  # Run overrepresentation analysis
+  run_overrepresentation_analysis(gene_set = msig_c3_gtrd,  dds_res = DE_results[[i]], analysis_name = my_prefix, gs_name = "C3_TFT_GTRD", type = "general")
+  run_overrepresentation_analysis(gene_set = msig_c3_tft,  dds_res = DE_results[[i]], analysis_name = my_prefix, gs_name = "C3_TFT_Legacy", type = "general")
+  
+  # Run Gene Set Enrichment Analysis
+  run_enrichment_analysis(gene_set = msig_c3_gtrd, geneList = geneList, analysis_name = my_prefix, gs_name = "C3_TFT_GTRD", type = "general")
+  run_enrichment_analysis(gene_set = msig_c3_tft, geneList = geneList, analysis_name = my_prefix, gs_name = "C3_TFT_Legacy", type = "general")
+
+
+  ##########################################################
+  ## C2 curated gene sets => CP:REACTOME Canonical pathways
+  ##########################################################
+  # Fetch gene sets
+  msig_c2_reactome <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME") %>% dplyr::select(gs_name, ensembl_gene, )
+  
+  # Run overrepresentation analysis
+  run_overrepresentation_analysis(gene_set = msig_c2_reactome,  dds_res = DE_results[[i]], analysis_name = i, gs_name = "C2_CP_REACTOME", type = "general") # using type = "general to avoid error in treeplot
+  
+  # Run Gene Set Enrichment Analysis
+  run_enrichment_analysis(gene_set = msig_c2_reactome, geneList = geneList, analysis_name = my_prefix, gs_name = "C2_CP_REACTOME", type = "reactome")
+}
+```
+
+
+# Look at correlation between Log2FC from pIC-WT-vs-None-WT and 25A-WT-vs-None-WT
+```{r Correlation analysis pIC-25A WT}
+df <- as.data.frame(cbind(
+                      Log2_pIC = res_wtIC_vs_wtNone$log2FoldChange, 
+                      Log2_25A = res_wt25A_vs_wtNone$log2FoldChange,
+                      adjp_pIC = res_wtIC_vs_wtNone$padj,
+                      adjp_25A = res_wt25A_vs_wtNone$padj
+                      )
+                    )
+rownames(df) <- rownames(res_wtIC_vs_wtNone)
+df$adjp_pIC[is.na(df$adjp_pIC)] <- 1
+df$adjp_25A[is.na(df$adjp_25A)] <- 1
+my_groups = ifelse(rownames(df) %in% rownames(res_wtIC_vs_wt25A_sig_fc1),
+                      "pIC vs 25A WT",
+                      ifelse(df$adjp_pIC <= 0.05 & df$adjp_25A <= 0.05,
+                        "pIC|25A vs None WT",
+                        ifelse(df$adjp_pIC <= 0.05,
+                          "pIC vs None WT",
+                          ifelse(df$adjp_25A <= 0.05,
+                            "25A vs None WT",
+                            "n.s"
+                            )
+                          )
+                        )
+                      )
+df$Groups = my_groups
+
+# Run correlation analysis between pIC and 25A withing groups
+corr.df <- data.frame()
+idx = 1
+for (i in levels(factor(df$Groups))){
+  df.sub <- subset(df, df$Groups == i)
+  x <- cor.test(df.sub$Log2_pIC, df.sub$Log2_25A, method = "pearson")
+  corr.df[idx, c("Group","Num_genes","R", "pval")] <- c(i,dim(df.sub)[1] ,round(x$estimate, digits = 2), round(x$p.value,digits = 3))
+  idx <- idx + 1
+}
+print(corr.df)
+
+# Generate correlation plot
+p2 <- ggplot(df, aes(x=Log2_pIC, y=Log2_25A)) + 
+        labs(title = "Comparison of Log2FC between pIC WT and 25A WT treated cells") +
+        geom_point(aes(colour=Groups), size = 1, alpha = 0.7) + 
+        xlim(-2.5,10) + ylim(-2.5,10) +
+        xlab(bquote('pIC WT vs None WT'* ~Log[2]*'FC')) +
+        ylab(bquote('25A WT vs None WT'* ~Log[2]*'FC')) +
+        geom_smooth(se = TRUE, method = "lm", colour = "darkgreen", size=0.5) +
+        geom_abline(slope = 1, intercept = 0, col = "darkgreen", size=0.5, linetype="dashed") +
+        theme_minimal() + scale_color_viridis(discrete = TRUE, option = "H") +  
+        theme(
+          legend.direction = "vertical",  
+          legend.position = c(.25, .95),
+          legend.justification = c("right", "top"),
+          legend.box.just = "right",
+          legend.margin = margin(3, 3, 3, 3),
+          legend.text = element_text(size = 8)
+        )
+ggsave(filename = "pICwt_vs_25Awt_Log2FC_correlation.pdf", plot = p2, device = "pdf", path = "./Plots/")
+p2
+```
+
+```{r}
+# Genes DE between pIC WT and 25A WT and that do not correlate
+cor.test(df[df$Groups == "pIC vs 25A WT" & abs(df$Log2_25A) <= 1 & abs(df$Log2_pIC) >= 1 ,]$Log2_pIC , df[df$Groups == "pIC vs 25A WT" & abs(df$Log2_25A) <= 1 & abs(df$Log2_pIC) >= 1,]$Log2_25A)
+
+df.filter <- df[df$Groups == "pIC vs 25A WT" & abs(df$Log2_25A) <= 1 & abs(df$Log2_pIC) >= 1 ,]
+
+
+# Save sorted files as a list
+df.filter.goo <- go_overrep(geneList = res_wtIC_vs_wtNone[rownames(df.filter), ] , log2FC_cutoff = 0, alpha = 1, my_file = paste0("./GO/", "pICWT_vs_25AWT"), onthology = "BP")
+
+df.filter.goenr <- go_enrichment(geneList = res_wtIC_vs_wtNone[rownames(df.filter), ] , 
+                                   my_file = paste0("./GO/", "pICWT_vs_25AWT"), 
+                                   onthology = "BP")
+
+```
+
+```{r Plot normalized (vst) gene expression for pathway}
+
+plot_vst_gene_expression <- function(my_dds, ensmbl_gene_list, file_prefix){
+  genes_of_interest_symbols <- ensembl_to_symbol$gene_name[ensembl_to_symbol$Ensembl_ID %in% ensmbl_gene_list]
+  pdf(file = paste0("./Plots/",file_prefix,"_vst_gene_expression.pdf"))
+  print("Expression of genes of interest")
+  for (my_gene in  genes_of_interest){
+    p <- print_gene_expression(dds.one, 
+                               my_gene, 
+                               ensembl_to_symbol[ensembl_to_symbol$Ensembl_ID == my_gene,2]
+                               )
+    print(p)
+  }
+  dev.off()
+}
+
+# eIF2 Signaling pathway + EIF factors
+genes_of_interest= c("ENSG00000254996","ENSG00000100129","ENSG00000055332","ENSG00000175390","ENSG00000184110","ENSG00000156976","ENSG00000184708","ENSG00000187840","ENSG00000233426","ENSG00000205609","ENSG00000130741","ENSG00000234028","ENSG00000178982","ENSG00000147677","ENSG00000084623","ENSG00000125977","ENSG00000106682","ENSG00000149100","ENSG00000063046","ENSG00000173674","ENSG00000158417","ENSG00000086232","ENSG00000151247","ENSG00000148730","ENSG00000277998","ENSG00000114867","ENSG00000180574","ENSG00000173812","ENSG00000070785","ENSG00000144895","ENSG00000198692","ENSG00000163577","ENSG00000135930","ENSG00000110321","ENSG00000253626","ENSG00000107581","ENSG00000229132","ENSG00000100664","ENSG00000242372","ENSG00000132507","ENSG00000243056","ENSG00000115211","ENSG00000128829","ENSG00000224546","ENSG00000143486","ENSG00000179523","ENSG00000163412","ENSG00000235001","ENSG00000162772","ENSG00000087074","ENSG00000108551","ENSG00000175197","ENSG00000136997","ENSG00000104408","ENSG00000140986","ENSG00000145425","ENSG00000147604","ENSG00000100129","ENSG00000140443","ENSG00000055332","ENSG00000122406","ENSG00000175390","ENSG00000184110","ENSG00000156976","ENSG00000172531","ENSG00000089009","ENSG00000188846","ENSG00000129824","ENSG00000122026","ENSG00000100030","ENSG00000213639","ENSG00000148303","ENSG00000117461","ENSG00000163682","ENSG00000168028","ENSG00000130741","ENSG00000172239","ENSG00000186468","ENSG00000174444","ENSG00000101255","ENSG00000124614","ENSG00000083845","ENSG00000178982","ENSG00000126934","ENSG00000137154","ENSG00000142937","ENSG00000147677","ENSG00000213281","ENSG00000198034","ENSG00000084623","ENSG00000116251","ENSG00000171863","ENSG00000163923","ENSG00000008128","ENSG00000221983","ENSG00000118181","ENSG00000265681","ENSG00000174748","ENSG00000044574","ENSG00000164587","ENSG00000109475","ENSG00000229117","ENSG00000089157","ENSG00000131469","ENSG00000112715","ENSG00000142676","ENSG00000125977","ENSG00000186298","ENSG00000143947","ENSG00000115268","ENSG00000142208","ENSG00000134419","ENSG00000231500","ENSG00000108298","ENSG00000149100","ENSG00000185088","ENSG00000114391","ENSG00000182899","ENSG00000147403","ENSG00000105221","ENSG00000173674","ENSG00000167526","ENSG00000158417","ENSG00000210112","ENSG00000086232","ENSG00000149806","ENSG00000198918","ENSG00000105372","ENSG00000197728","ENSG00000063177")
+
+plot_vst_gene_expression(my_dds =  dds.one, ensmbl_gene_list = genes_of_interest, file_prefix = "eIF2_sig_ptwy_EIF_factors")
+```
+
+
+# Comparing CVs from pIC WT and 25A WT to see if pIC WT replitates are more dispersed than 25A WT's
+```{r}
+a25_mean <- rowMeans(counts(dds.one, normalized = TRUE)[,meta_one$Group_gt_ind == "WT25A"])
+pIC_mean <- rowMeans(counts(dds.one, normalized = TRUE)[,meta_one$Group_gt_ind == "WTpolyIC"])
+a25_sd <- rowSds(counts(dds.one, normalized = TRUE)[,meta_one$Group_gt_ind == "WT25A"])
+pIC_sd <- rowSds(counts(dds.one, normalized = TRUE)[,meta_one$Group_gt_ind == "WTpolyIC"])
+
+t.test.result <- t.test(as.vector(pIC_sd/pIC_mean), as.vector(a25_sd/a25_mean))
+print(t.test.result) 
+
+```
+Welch Two Sample t-test Result
+
+    data:  as.vector(pIC_sd/pIC_mean) and as.vector(a25_sd/a25_mean)
+    t = 19.892, df = 46705, p-value < 2.2e-16
+    alternative hypothesis: true difference in means is not equal to 0
+    95 percent confidence interval:
+     0.0829448 0.1010772
+    sample estimates:
+    mean of x mean of y 
+    0.6996308 0.6076198
+
+Conclusion:
+pIC-SD is 70% of the mean while 25A is 61%. They do not seem to be that different. Therefore, the different slop of the 
+
+
+
+```{r}
+sessionInfo()
+```
