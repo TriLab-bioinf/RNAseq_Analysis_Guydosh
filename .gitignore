@@ -1,0 +1,13 @@
+DE/
+Plots/
+GO/
+ClusterProfiler/
+IPA/
+Cytoscape/
+BINGO/
+CLUEGO/
+DESeq2/
+data/
+renv/
+*.html
+
