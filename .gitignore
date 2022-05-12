@@ -10,4 +10,5 @@ DESeq2/
 data/
 renv/
 *.html
-
+.R*
+~*
