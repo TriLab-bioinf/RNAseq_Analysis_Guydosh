@@ -1,0 +1,47 @@
+---
+title: "Study of transcriptomic response to RNAseL activation induced by 2-5A/poly I:C using bulk RNAseq"
+output: html_notebook
+author: Hernan Lorenzi
+---
+
+\Center
+
+*PI:* Nick Guydosh
+*Point of Contact:* Agnes Karasik
+*Contact email:* agnes.karasik@nih.gov
+
+*Summary:* The goal of this project is to identify metabolic pathways and transcription factors that are turned on during the activation of the cellular response against viral infections using bulk RNAseq data.
+
+```{r, setup, message=FALSE, error=FALSE, include=FALSE}
+
+```
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(cowplot)
+```
+
+# Load data
+```{r}
+read_counts <- as.data.frame(read_tsv(file = "05counts/read_counts", col_names = TRUE, comment = "#"))
+rownames(read_counts) <- read_counts$Geneid # adding gene ids as row names
+read_counts <- read_counts[, c(7:10)] # Keeping just the reads count columns
+
+# Rename sample names
+colnames(read_counts) <- c("SRR3419767", "SRR3419770", "SRR3419769", "SRR3419768")
+
+# Build metadata table
+metadata <- as.data.frame(cbind(
+  sample_id = c("testes_1", "testes_2", "seminal_vesicles_1", "seminal_vesicles_2"),
+  tissue = c(rep("testes",2), rep("seminal_vesicles",2)),
+  sra_id =c("SRR3419767","SRR3419768","SRR3419769","SRR3419770")
+                   )
+              )
+rownames(metadata) <- metadata$sra_id
+
+# Sort tables so metadata and read counts match order
+read_counts <- read_counts[,match(rownames(metadata), colnames(read_counts))]
+
+```

@@ -234,5 +234,34 @@ print_gene_expression <- function(dds, gene_id, symbol = "", title_prefix = ""){
   return(p)
 }
 
+agnes_volcanoplot <- function(res.tmp, my_file_name, log_scale = FALSE, gene_list, my_comparison = ""){
+  res.tmp <- replace_gene_acc_by_symbols_in_dds(res.tmp)
+  gene_list.sig <- gene_list[res.tmp[gene_list,]$padj < 0.05 & res.tmp[gene_list,]$log2FoldChange >= 1]
+  #volcano plot
+  vp <- EnhancedVolcano(res.tmp, 
+                        lab = rownames(res.tmp), 
+                        x = 'log2FoldChange', 
+                        y = 'padj',
+                        pCutoff = 0.05,
+                        FCcutoff = 1,
+                        pointSize = 3,
+                        colAlpha = 1,
+                        shape = 1,
+                        labSize = 2,  # Controls labels size
+                        labCol = "black",
+                        title = res.tmp@elementMetadata$description[2],
+                        titleLabSize = 10,
+                        col=c('grey', 'grey', 'grey', 'red3'),
+                        legendPosition = 'none',
+                        axisLabSize = 10,
+                        drawConnectors = TRUE,
+                        lengthConnectors = unit(0.0001, "npc"),
+                        #selectLab = gene_list.sig, # vector of gene symbols to label on volcanoplot
+                        boxedLabels = FALSE,
+                        gridlines.major = FALSE,
+                        gridlines.minor = FALSE
+                  ) 
 
+    ggsave2(filename = paste0(my_file_name,".pdf"), plot = vp, path = "./PAPER")
 
+}

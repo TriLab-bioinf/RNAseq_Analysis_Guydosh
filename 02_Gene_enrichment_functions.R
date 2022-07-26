@@ -169,7 +169,12 @@ run_overrepresentation_analysis <- function(gene_set, dds_res,
 }
 
 # Function for enrichment analysis (ONLY FOR HUMAN GENES SO FAR)
-run_enrichment_analysis <- function(gene_set, geneList, analysis_name = "dds.result", gs_name = "MSigDB", adj_p_cutoff = 0.05, type = "general"){
+run_enrichment_analysis <- function(gene_set, 
+                                    geneList, 
+                                    analysis_name = "dds.result", 
+                                    gs_name = "MSigDB",
+                                    adj_p_cutoff = 0.05, 
+                                    type = "general", no_plots = FALSE){
   # Inputs: gene_set=Gene set from MSigDB, 
   # geneList=a list with ensembl_ids as names and decremented order of Log2FCs as values
   # analysis_name=prefix describing DE comparison for output file names
@@ -189,12 +194,14 @@ run_enrichment_analysis <- function(gene_set, geneList, analysis_name = "dds.res
     if(dim(msig_h.gsea@result)[1] > 0){ 
       # Convert Entrez gene IDs to gene symbols
       msig_h.gsea.gs <- setReadable(msig_h.gsea, org.Hs.eg.db, keyType = "ENTREZID")
+      if(no_plots){return(msig_h.gsea.gs)}
     } 
   } else {
     msig_h.gsea <- GSEA(geneList, TERM2GENE = gene_set, pvalueCutoff = adj_p_cutoff, verbose = TRUE, eps = 0)
     if(dim(msig_h.gsea@result)[1] > 0){ 
       # Convert Entrez gene IDs to gene symbols
       msig_h.gsea.gs <- setReadable(msig_h.gsea, org.Hs.eg.db, keyType = "ENSEMBL")
+      if(no_plots){return(msig_h.gsea.gs)}
     }  
     
   } 
@@ -328,6 +335,7 @@ run_enrichment_analysis <- function(gene_set, geneList, analysis_name = "dds.res
     print(p14)
     print(p16)
   }
+  return(msig_h.gsea.gs)
 }
 
 go_overrep <- function(dds_res, my_file, golevel = 3, 
@@ -367,7 +375,8 @@ go_overrep <- function(dds_res, my_file, golevel = 3,
                   readable      = TRUE,
                   minGSSize = 10,
                   maxGSSize = 500
-  )
+        )
+  
   write.table(ego, file = paste0(my_path,"GO_OVERREP.",onthology,".",my_file,".txt"), sep = "\t", col.names=NA)
   
   # Network plots and tree plots for all, up and downregulated pathways
@@ -381,9 +390,13 @@ go_overrep <- function(dds_res, my_file, golevel = 3,
       log2fc.median <- median(subset(log2fc_symb.df, log2fc_symb.df$symbols %in% g.vec)[,"log2FoldChange"])
       my_median_log2fc <- c(my_median_log2fc,log2fc.median)
     }
-    # Add median Log2FC column
+    # Add median Log2FC column to distance matrix
     if(length(my_median_log2fc) == 0){my_median_log2fc <- 0}
     distance_matrix@result$median.log2fc <- my_median_log2fc
+    
+    # Add median Log2FC column to ego object
+    if(length(my_median_log2fc) == 0){my_median_log2fc <- 0}
+    ego@result$median.log2fc <- my_median_log2fc
     
     # Network plot
     p6 <- emapplot(distance_matrix, 
@@ -402,6 +415,7 @@ go_overrep <- function(dds_res, my_file, golevel = 3,
     p12 <- treeplot(distance_matrix, showCategory = 80, 
                     nCluster = 2 * sqrt(number_of_categories), 
                     color = "median.log2fc", nWords = 0)
+    
     ggsave2(filename = paste0(my_path,"GO_OVERREP.",onthology,".",my_file,"_tree.pdf"), 
             plot = p12, width = 11, height = 8 * (number_of_categories/40))
     
@@ -612,3 +626,193 @@ go_gsea <- function(dds_res, my_file, golevel = 3,
   return(go.gsea.gs)
 }
 
+PAPER_plot_gsea <- function(gsea_result, comparison_id, 
+                          analysis_type = "GSEA",
+                          my_x_label = "Gene sets",
+                          my_path = "./PAPER"){
+  
+  dir.create(path = my_path, showWarnings = FALSE)
+  my_file <- comparison_id
+  
+  if(str_count(string = my_file, pattern = "_PAPER") == 0){
+    my_file <- paste0(my_file,"_PAPER")
+  }
+  
+  if(str_count(string = my_file, pattern = analysis_type) == 0){
+    my_file <- paste0(my_file,"_", analysis_type)
+  }
+  
+  REPORT_TOP_CUTOFF = 10 # per NES score direction (UP or DOWN)
+  
+  if(length(gsea_result@result$NES) > 0){
+    
+    # Upset plots
+    # filter out signatures with NES < 0 
+    gsea_result_bt_0 <- filter(gsea_result, NES > 0) # filter out signatures with NES > 0
+    gsea_result_lt_0 <- filter(gsea_result, NES < 0) # filter out signatures with NES < 0
+    
+    
+    # Select representative gene set per clusters based on NES * gene_number
+    p_top_go_up <- get_gsea_clusters(gsea_result_bt_0, my_report_top_cutoff = REPORT_TOP_CUTOFF) # UP gene sets
+    p_top_go_down <- get_gsea_clusters(gsea_result_lt_0, my_report_top_cutoff = REPORT_TOP_CUTOFF) # DOWN gene sets
+    
+    # Merge UP and DOWN gene sets
+    if(!is.null(dim(p_top_go_up)[1]) & !is.null(dim(p_top_go_down)[1])){
+      my_top_go_per_cluster <- bind_rows(list(p_top_go_up, p_top_go_down))
+    } else if (!is.null(dim(p_top_go_up)[1])){
+      my_top_go_per_cluster <- p_top_go_up
+    } else if (!is.null(dim(p_top_go_down)[1])){
+        my_top_go_per_cluster <- p_top_go_down
+    } else {return(paste("The following gave no results:", my_file))}
+    
+    # Make barplot for PAPER
+    p.treebased_barplot <- ggbarplot(my_top_go_per_cluster, 
+                                     x = "label", 
+                                     y = "color",
+                                     fill = my_top_go_per_cluster$my_custom_color, #"count",          # change fill color by cyl
+                                     color = "white",            # Set bar border colors to white
+                                     sort.by.groups = FALSE,     # Don't sort inside each group
+                                     x.text.angle = 90,          # Rotate vertically x axis texts
+                                     rotate = TRUE,
+                                     ggtheme = theme_classic(),
+                                     ylab = c("Normalized Enrichment Score (NES)"),
+                                     lab.size = 1
+    ) + #+ gradient_fill("RdYlBu")
+      xlab(my_x_label) + 
+      scale_y_continuous(breaks=seq(
+                                    round(min(my_top_go_per_cluster$color), digits = 0) - 1,
+                                    round(max(my_top_go_per_cluster$color), digits = 0) + 1,
+                                    1
+                                    )
+                        ) # + scale_x_discrete(labels = function(x) str_wrap(x, width = 65, ))
+    
+    # Save plot
+    ggsave2(filename = paste0("barplot_",my_file,".pdf"), plot = p.treebased_barplot, path = my_path, width = 12 )
+    
+  }  
+  
+}
+
+# Network plots and tree plots for all, up and downregulated pathways
+get_gsea_clusters <- function(my_gsea_result, my_report_top_cutoff = 10){
+  
+  if(dim(my_gsea_result)[1] > 1){ # We need at least 2 nodes for a network or tree plot
+    dm <- pairwise_termsim(my_gsea_result, showCategory = 400)
+    
+    # Treeplots
+    number_of_categories = min(80, as.vector(table(dm@result$p.adjust < 0.05)[['TRUE']]))
+    tree.p <- treeplot(dm, showCategory = number_of_categories,
+                       color = 'NES',
+                       nCluster = min(my_report_top_cutoff, number_of_categories), # 2 * sqrt(number_of_categories), 
+                       nWords = 0)
+    
+    # ggsave2(filename = paste0(my_path,"GSEA_GO.",onthology,".",my_file,"_tree.pdf"), 
+    #        plot = tree.p, width = 11, height = 8 * (number_of_categories/40))
+  
+
+  
+    # keep just top GO per cluster based on abs(NES). Cluster ID = group, NES = color
+    my_data <- tree.p$data
+    my_data <- mutate(my_data, score = color * count)
+    
+    # Split hits into up and downs so there is a fare representation of both in the final plot for the paper
+    my_top_go_per_cluster <- subset(my_data, isTip == TRUE) %>% group_by(group) %>% slice_max(order_by = abs(score), n = 1, with_ties = FALSE)
+    
+    # Add bar's colors 
+    my_top_go_per_cluster$my_custom_color <- ifelse(my_top_go_per_cluster$color > 0, "darkgreen", "red")
+    
+    # Sort barchar by NES
+    my_top_go_per_cluster <- arrange(my_top_go_per_cluster, desc(color) )
+    
+    # Edit hallmark gene set labels
+    if(str_count(string = my_top_go_per_cluster$label[1], pattern = "HALLMARK_") > 0){
+      my_top_go_per_cluster$label <- str_replace_all(string = my_top_go_per_cluster$label, pattern = "_", replacement = " ") %>% str_replace(pattern = "HALLMARK ", "") %>% tolower()
+    } else if (str_count(string = my_top_go_per_cluster$label[1], pattern = "_TARGET_GENES") > 0 ){
+      my_top_go_per_cluster$label <- str_replace_all(string = my_top_go_per_cluster$label, pattern = "_TARGET_GENES", replacement = " target genes")
+    } else {
+      my_top_go_per_cluster$label <- str_replace_all(string = my_top_go_per_cluster$label, pattern = "_", replacement = " ")
+    }
+    
+    return(my_top_go_per_cluster)
+  } else {print("get_gsea_clusters: GSEA RESULT SHOULD HAVE MORE THAN ONE SIGNIFICANT GENE SET!")}
+}
+
+add_lo2fc <- function(dm){ # dm = distance matrix
+  # Get median Log2FC per identified pathway
+  my_median_log2fc <- c()
+  for (g in dm@result$geneID){
+    g.vec <- strsplit(g, "/")[[1]]
+    log2fc.median <- median(subset(log2fc_symb.df, log2fc_symb.df$symbols %in% g.vec)[,"log2FoldChange"])
+    my_median_log2fc <- c(my_median_log2fc,log2fc.median)
+  }
+  # Add median Log2FC column
+  if(length(my_median_log2fc) == 0){my_median_log2fc <- 0}
+  dm@result$median.log2fc <- my_median_log2fc
+  return(dm)
+}
+
+plot_simplified_network <- function(enrichment_result, top_categories){
+  
+  REPORT_TOP_CUTOFF <- top_categories
+  
+  #distance_matrix <- pairwise_termsim(enrichment_result, showCategory = 400)
+  #distance_matrix <- add_lo2fc(dm = distance_matrix)
+  
+  # add NES column with median.log2fc values to be compatible with get_gsea_clusters function
+  if(is.null(enrichment_result@result$NES)){
+    enrichment_result@result$NES <- enrichment_result@result$median.log2fc
+  }
+  
+  ########################## FIX BEGIN
+  # process up and down pathways separately,
+  # so both changes are represented in the simplified plot
+  
+  # filter out signatures with NES < 0 
+  enrichment_result_bt_0 <- filter(enrichment_result, NES > 0) # filter out signatures with NES > 0
+  enrichment_result_lt_0 <- filter(enrichment_result, NES < 0) # filter out signatures with NES < 0
+  
+  
+  # Select representative gene set per clusters based on NES * gene_number
+  p_top_go_up <- get_gsea_clusters(my_gsea_result = enrichment_result_bt_0, my_report_top_cutoff = REPORT_TOP_CUTOFF) # UP gene sets
+  p_top_go_down <- get_gsea_clusters(my_gsea_result = enrichment_result_lt_0, my_report_top_cutoff = REPORT_TOP_CUTOFF) # DOWN gene sets
+  
+  # Merge UP and DOWN gene sets
+  if(!is.null(dim(p_top_go_up)[1]) & !is.null(dim(p_top_go_down)[1])){
+    my_top_go_per_cluster <- bind_rows(list(p_top_go_up, p_top_go_down))
+  } else if (!is.null(dim(p_top_go_up)[1])){
+    my_top_go_per_cluster <- p_top_go_up
+  } else if (!is.null(dim(p_top_go_down)[1])){
+    my_top_go_per_cluster <- p_top_go_down
+  } else {return(paste("The following gave no results:", my_file))}
+  
+  
+  ########################## FIX END
+  
+  
+  #my_top_go_per_cluster <- get_gsea_clusters(my_gsea_result = enrichment_result, 
+  #                                           my_report_top_cutoff = top_categories)
+  top_cluster_ids <- my_top_go_per_cluster$label
+  
+  ego.filtered = enrichment_result %>% filter(Description %in% top_cluster_ids)
+  distance_matrix.filter <- pairwise_termsim(ego.filtered, showCategory = 400)
+  #distance_matrix.filter <- add_lo2fc(distance_matrix.filter)
+  
+  # network
+  my_max_range <- max(abs(distance_matrix.filter$median.log2fc))
+  p.net.filter <- emapplot(distance_matrix.filter, 
+                           repel = T, 
+                           showCategory = 200, 
+                           legend_n = 5, 
+                           min_edge = 0.4 , 
+                           color = "median.log2fc", 
+                           cex_label_category = 0.4,
+                           node_label = "category",
+                           shadowtext = FALSE,
+                           label_style = "ggforce",
+                           label_format = 10) + 
+    scale_edge_width(range = c(0.1,2)) +
+    
+    #scale_colour_gradientn(colours = myPalette(100), limits=c(-1 * my_max_range , my_max_range))
+    
+    return(p.net.filter)
+}

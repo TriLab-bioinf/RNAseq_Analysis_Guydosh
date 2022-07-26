@@ -1,12 +1,26 @@
 ---
-title: "RNAseL RNAseq Analysis"
-author: "Hernan Lorenzi"
+title: "Study of transcriptomic response to RNAseL activation induced by 2-5A/poly I:C using bulk RNAseq"
+output: html_notebook
+author: Hernan Lorenzi
 date: "3/1/2022"
 output: html_notebook
+
 ---
 
+\Center
+
+*PI:* Nick Guydosh
+*Point of Contact:* Agnes Karasik
+*Contact email:* agnes.karasik@nih.gov
+
+*Summary:* The goal of this project is to identify metabolic pathways and transcription factors that are turned on during the activation of the cellular response against viral infections using bulk RNAseq data.
+
+```{r, setup, message=FALSE, error=FALSE, include=FALSE}
+
+```
+
 # Load libraries
-```{r load libraries}
+```{r load libraries, message=FALSE}
 suppressMessages(library("org.Hs.eg.db"))
 suppressMessages(library("pheatmap"))
 suppressMessages(library("EnhancedVolcano"))
@@ -29,6 +43,7 @@ suppressMessages(library("cowplot"))
 suppressMessages(library("enrichplot"))
 suppressMessages(library("ReactomePA"))
 suppressMessages(library("ggupset"))
+suppressMessages(library("ggraph"))
 ```
 
 # Define functions
@@ -45,7 +60,7 @@ source(file = "./02_Gene_enrichment_functions.R")
 
 # Load data
 ```{r Loading data}
-all <- read.delim2("read_counts_exonic.txt", sep = "\t", header = TRUE, row.names = 1, comment.char = c("#"))
+all <- read.delim2("./data/read_counts_exonic.txt", sep = "\t", header = TRUE, row.names = 1, comment.char = c("#"))
 
 # delete columns corrsponding to polyA-selected samples (AK067M, AK068M, AK069M)
 all <- all[,!colnames(all) %in% c("AK5404_67", "AK5404_68", "AK5404_69")]
@@ -60,7 +75,7 @@ gene_symbols <- replace_gene_acc_by_symbol_ids(rownames(all))
 ensembl_to_symbol <- as.data.frame(cbind("Ensembl_ID" = rownames(all), "gene_name" = gene_symbols), row.names = 1)
 
 # Load metadata
-metadata <- read.delim2("Metadata.txt", sep = "\t", row.names = 1, header = T)
+metadata <- read.delim2("./data/Metadata.txt", sep = "\t", row.names = 1, header = T)
 
 # Sort tables so metadata and read counts match order
 metadata<-  metadata[match(colnames(all), metadata$Sample_name), ]
@@ -349,8 +364,8 @@ DE_results[["wtIC_vs_wt25A_sig_f1"]] <- res_wtIC_vs_wt25A_sig_fc1.logfc_sorted
 ```{r}
 VennDiagram::venn.diagram(x = list(wt.g, ko.g, wt.25A.g ),
   category.names = c("WT_plyI:C", "KO_polyI:C", "WT_25A"),
-  filename = "Inducer_DE_venn.png",
-  imagetype = "png",
+  filename = "Inducer_DE_venn.pdf",
+  imagetype = "svg",
   output=TRUE,
   height = 480 , 
   width = 480 , 
@@ -408,11 +423,21 @@ plot_normalized_gene_expression(my_dds = dds.one,
 ```
 
 ```{r volcano plots}
-# Print volcano plots for eahc condition
+genes_of_interest_symbols <- c("RSAD2", "IFNL1", "IFNL2", "IFNB1", "RAET1L","OAS2","EGR1","DHX58","OASL","IFIH1","IFIT1","IFIT2","IFIT3","IL6","NFKBIZ","DDX58","ZC3HAV1","CXCL2","CXCL8","STAT1","MYC","SRRM2","ND4","GAPDH","ACTB","RPL7","RNY3","RNY4","EIF2A","POLR3K")
+
+
+# Print volcano plots for each condition
 generate_volcano_plot_with_ids(res.tmp = res_wtIC_vs_wtNone, my_file_name = "res_wtIC_vs_wtNone.logfc_sorted", gene_list = genes_of_interest_symbols)
 generate_volcano_plot_with_ids(res_koIC_vs_koNone, my_file_name = "res_koIC_vs_koNone.logfc_sorted", gene_list = genes_of_interest_symbols)
 generate_volcano_plot_with_ids(res_wt25A_vs_wtNone, my_file_name = "res_wt25A_vs_wtNone.logfc_sorted", gene_list = genes_of_interest_symbols)
 generate_volcano_plot_with_ids(res_ko25A_vs_koNone, my_file_name = "res_ko25A_vs_koNone.logfc_sorted", gene_list = genes_of_interest_symbols)
+
+# Print AGNES' style volcano plots for each condition for PAPER
+
+agnes_volcanoplot(res.tmp = res_wtIC_vs_wtNone, my_file_name = "res_wtIC_vs_wtNone.logfc_sorted", gene_list = genes_of_interest_symbols, my_comparison = 'poly I:C vs Control')
+agnes_volcanoplot(res.tmp = res_koIC_vs_koNone, my_file_name = "res_koIC_vs_koNone.logfc_sorted", gene_list = genes_of_interest_symbols, my_comparison = 'poly I:C vs Control')
+agnes_volcanoplot(res.tmp = res_wt25A_vs_wtNone, my_file_name = "res_wt25A_vs_wtNone.logfc_sorted", gene_list = genes_of_interest_symbols, my_comparison = '2-5A vs Control')
+agnes_volcanoplot(res.tmp = res_ko25A_vs_koNone, my_file_name = "res_ko25A_vs_koNone.logfc_sorted", gene_list = genes_of_interest_symbols, my_comparison = '2-5A vs Control')
 
 ```
 
@@ -723,6 +748,19 @@ for (i in names(DE_results)){
     go.gsea[[my_id]] <- go_gsea(dds_res = DE_results[[i]], 
                                    my_file = i, 
                                    onthology = ontho)
+    
+    # Generate barplot for paper
+    PAPER_plot_gsea(gsea_result = go.gsea[[my_id]], 
+                    comparison_id = i, 
+                    analysis_type = paste0("GO_",ontho),
+                    my_x_label = paste0("Gene Ontology (", ontho, ")"),
+                    my_path = "./PAPER")
+
+    
+    p.simp_net_plot <- plot_simplified_network(enrichment_result = go.overrep[[my_id]], top_categories = 30)
+    ggsave2(filename = paste0(i,"_simplified_network.pdf"), plot = p.simp_net_plot, path = "./PAPER/", height = 11, width = 9)
+    
+    print(paste("Done with", my_id))
   }
 }
 
@@ -738,8 +776,31 @@ MSigDBs can be downloaded from R with the function msigdbr (see below).
 
 ```{r enrichment analysis with MSigDB}
 
+SKIP_GSEA_PLOTS = FALSE
+
 # You can modify the category and subcategory parameters below to retrieve specific gene sets from GSEA's MSIG database.
-for (i in names(DE_results)){
+
+########################################################################################
+# Fetch gene sets
+########################################################################################
+
+########################################
+## H: hallmark gene sets
+########################################
+msig_h <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, ensembl_gene, ) 
+  
+###########################################################################
+## C3 regulatory target gene sets => TFT: transcription factor targets
+###########################################################################
+msig_c3_gtrd <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:GTRD") %>% dplyr::select(gs_name, ensembl_gene, )
+msig_c3_tft <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:TFT_Legacy") %>% dplyr::select(gs_name, ensembl_gene, )
+  
+##########################################################
+## C2 curated gene sets => CP:REACTOME Canonical pathways
+##########################################################
+msig_c2_reactome <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME") %>% dplyr::select(gs_name, ensembl_gene, )
+  
+for (i in names(DE_results)[1:3]){
   # Reset gene lists for each analysis
   genes = c()
   geneList = list()
@@ -761,43 +822,62 @@ for (i in names(DE_results)){
   ########################################
   ## H: hallmark gene sets
   ########################################
-  # Fetch gene sets
-  msig_h <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, ensembl_gene, ) 
   
   # Run overrepresentation analysis
   run_overrepresentation_analysis(gene_set = msig_h, dds_res = DE_results[[i]], analysis_name = my_prefix, gs_name = "H", type = "general")
   
   # Run Gene Set Enrichment Analysis
-  run_enrichment_analysis(gene_set = msig_h, geneList = geneList, analysis_name = my_prefix, gs_name = "H", type = "general")
+  gsea_result <- run_enrichment_analysis(gene_set = msig_h, geneList = geneList, analysis_name = my_prefix, gs_name = "H", type = "general", no_plots = SKIP_GSEA_PLOTS)
   
+   # Generate barplot for paper
+    PAPER_plot_gsea(gsea_result = gsea_result, 
+                    comparison_id = i, 
+                    analysis_type = paste0("HALLMARKS"),
+                    my_x_label = "Cellular Hallmarks",
+                    my_path = "./PAPER")
   
   ###########################################################################
   ## C3 regulatory target gene sets => TFT: transcription factor targets
   ###########################################################################
-  # Fetch gene sets
-  msig_c3_gtrd <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:GTRD") %>% dplyr::select(gs_name, ensembl_gene, )
-  msig_c3_tft <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:TFT_Legacy") %>% dplyr::select(gs_name, ensembl_gene, )
   
   # Run overrepresentation analysis
   run_overrepresentation_analysis(gene_set = msig_c3_gtrd,  dds_res = DE_results[[i]], analysis_name = my_prefix, gs_name = "C3_TFT_GTRD", type = "general")
   run_overrepresentation_analysis(gene_set = msig_c3_tft,  dds_res = DE_results[[i]], analysis_name = my_prefix, gs_name = "C3_TFT_Legacy", type = "general")
   
   # Run Gene Set Enrichment Analysis
-  run_enrichment_analysis(gene_set = msig_c3_gtrd, geneList = geneList, analysis_name = my_prefix, gs_name = "C3_TFT_GTRD", type = "general")
-  run_enrichment_analysis(gene_set = msig_c3_tft, geneList = geneList, analysis_name = my_prefix, gs_name = "C3_TFT_Legacy", type = "general")
+  gsea_result.gtrd <- run_enrichment_analysis(gene_set = msig_c3_gtrd, geneList = geneList, analysis_name = my_prefix, gs_name = "C3_TFT_GTRD", type = "general", no_plots = SKIP_GSEA_PLOTS)
+  gsea_result.tft <- run_enrichment_analysis(gene_set = msig_c3_tft, geneList = geneList, analysis_name = my_prefix, gs_name = "C3_TFT_Legacy", type = "general", no_plots = SKIP_GSEA_PLOTS)
 
-
+  # Generate barplot for paper
+    PAPER_plot_gsea(gsea_result = gsea_result.gtrd, 
+                    comparison_id = i, 
+                    analysis_type = paste0("C3_TFT_GTRD"),
+                    my_x_label = "Transcription Factors (GTRD DB)",
+                    my_path = "./PAPER")
+    
+    # Generate barplot for paper
+    PAPER_plot_gsea(gsea_result = gsea_result.tft, 
+                    comparison_id = i, 
+                    analysis_type = paste0("C3_TFT_Legacy"),
+                    my_x_label = "Transcription Factors (MSigDB)",
+                    my_path = "./PAPER")
+  
   ##########################################################
   ## C2 curated gene sets => CP:REACTOME Canonical pathways
   ##########################################################
-  # Fetch gene sets
-  msig_c2_reactome <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME") %>% dplyr::select(gs_name, ensembl_gene, )
-  
+
   # Run overrepresentation analysis
   run_overrepresentation_analysis(gene_set = msig_c2_reactome,  dds_res = DE_results[[i]], analysis_name = i, gs_name = "C2_CP_REACTOME", type = "general") # using type = "general to avoid error in treeplot
   
   # Run Gene Set Enrichment Analysis
-  run_enrichment_analysis(gene_set = msig_c2_reactome, geneList = geneList, analysis_name = my_prefix, gs_name = "C2_CP_REACTOME", type = "reactome")
+  gsea_result.reactome <- run_enrichment_analysis(gene_set = msig_c2_reactome, geneList = geneList, analysis_name = my_prefix, gs_name = "C2_CP_REACTOME", type = "reactome", no_plots = SKIP_GSEA_PLOTS)
+
+  # Generate barplot for paper
+    PAPER_plot_gsea(gsea_result = gsea_result.reactome, 
+                    comparison_id = i, 
+                    analysis_type = paste0("C2_CP_REACTOME"),
+                    my_x_label = "Reactome Pathways",
+                    my_path = "./PAPER")
 }
 ```
 

@@ -12,3 +12,14 @@ renv/
 *.html
 .R*
 ~*
+.Rproj.user
+*.log
+*.xlsx
+.DS_Store
+Inducer_DE_venn.pdf
+Inducer_DE_venn.png
+PAPER/
+RNAseL_analysis.Rmd
+TE.R
+TEST_barplot.pdf
+read_counts_exonic_rnaseL.txt
